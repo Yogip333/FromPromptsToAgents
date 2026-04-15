@@ -7,8 +7,8 @@
 ## Quick Start
 
 ```bash
-git clone <repo-url>
-cd Workshop
+git clone https://github.com/UH-Workshop-M726/FromPromptsToAgents.git
+cd FromPromtsToAgents/
 ```
 
 Each session is self-contained. Follow the steps in order within each session folder.
