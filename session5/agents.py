@@ -170,62 +170,59 @@ async def run_agent_with_mcp(
 # Agent 1: Food Analysis Agent
 # ---------------------------------------------------------------------------
 
-FOOD_ANALYSIS_SYSTEM_PROMPT = """\
-You are the Food Analysis Agent, an expert culinary analyst. Your role is to \
-thoroughly analyse a dish and produce a detailed, structured task specification \
-that a Robotics Design Agent can use to design an automated cooking robot.
 
-When given a dish name, use the available tools to:
-1. Analyse the dish fully (ingredients, steps, techniques)
-2. Get the detailed cooking techniques
-3. Get equipment specifications for key equipment
-4. Get safety requirements
+# New system prompt for Smart Budget RobotChef
+BUDGET_NUTRITION_SYSTEM_PROMPT = """
+You are the Food Analysis Agent for Smart Budget RobotChef. Your job is to:
+- Select a dish for a two-person meal that fits the user's budget and nutrition target (high protein, vegetarian, or balanced)
+- Use the available tools to:
+    1. Search for a suitable dish (search_dishes)
+    2. Get nutrition and price info for the dish
+    3. Analyse the dish fully (ingredients, steps, techniques, equipment, safety)
+- Justify your choice and explain any trade-offs (e.g., if protein is lower than ideal, or price is close to budget)
+- Output a clear, structured TASK SPECIFICATION for the Robotics Agent, including:
+    - Dish name, price, protein, kcal, vegetarian status
+    - Why this dish was chosen (with numbers)
+    - Any trade-offs
+    - All info needed for the robot design (as in the original prompt)
 
-Then synthesise all this information into a comprehensive TASK SPECIFICATION \
-with the following clearly labelled sections:
-
-## Dish Overview
-- Name, cuisine, difficulty, servings, total time
-
-## Physical Tasks Required
-For each step, describe the physical action needed:
-- Cutting/chopping (specify precision, force, dimensions)
-- Stirring/mixing (specify speed, duration, force)
-- Pouring/dispensing (specify volume, precision, temperature)
-- Heating/temperature control (specify temperatures, durations, precision)
-- Timing coordination (specify concurrent operations)
-
-## Cooking Techniques with Precision Requirements
-List each technique with:
-- Temperature requirements (exact values in C)
-- Duration requirements
-- Precision level (critical/high/medium)
-- Failure modes if done incorrectly
-
-## Equipment to Operate
-For each piece of equipment:
-- What it is and how it must be operated
-- Temperature ranges
-- Physical interaction needed (knobs, handles, placement)
-
-## Safety Requirements
-- Temperature hazards and maximum temperatures
-- Splash/splatter risks
-- Timing-critical steps
-- Food safety considerations
-
-## Robotics Task Specification
-A summary designed specifically for a Robotics Design Agent, listing:
-- All manipulation tasks (with required degrees of freedom and force ranges)
-- All sensing requirements (temperature, vision, force feedback)
-- Workspace requirements (dimensions, stations)
-- Speed and timing constraints
-- Safety constraints for the robot
-
-Be thorough and specific - the Robotics Agent depends entirely on your analysis \
-to design an appropriate robot. Include exact temperatures, durations, and force \
-estimates wherever possible.
+Be realistic and concise. Always use real prices and nutrition from the tools. If no perfect match, pick the closest and explain why.
 """
+
+# New function for Smart Budget RobotChef
+
+async def run_budget_nutrition_agent(budget: float, nutrition: str, people: int, status_callback=None) -> str:
+    """
+    Run Agent 1 for Smart Budget RobotChef: selects dish by budget/nutrition/people, justifies, and outputs full spec.
+    If the final output is still tool call JSONs or a conversation log, send it back to the LLM for summarization.
+    """
+    server_script = str(SERVER_DIR / "recipe_mcp_server.py")
+    user_message = (
+        f"Find the best dish for £{budget} total, {people} people, nutrition target: {nutrition}. "
+        f"Use all available tools to justify your choice with real price and nutrition, then analyse the dish fully and output a complete task specification for the Robotics Agent."
+    )
+    result = await run_agent_with_mcp(
+        server_script=server_script,
+        system_prompt=BUDGET_NUTRITION_SYSTEM_PROMPT,
+        user_message=user_message,
+        status_callback=status_callback,
+    )
+
+    # If the result looks like tool call JSONs or a conversation log, ask LLM to summarize
+    if result.strip().startswith('{"name":') or result.strip().startswith('[{"name":') or result.strip().startswith('system') or result.strip().startswith('user') or result.strip().startswith('assistant'):
+        if status_callback:
+            status_callback("Post-processing: summarizing tool results into human-readable meal analysis...")
+        summary_prompt = (
+            "Summarize the following as a clear, human-readable meal analysis and robotics task specification for a technical audience. "
+            "Do NOT output tool call JSONs or conversation logs.\n\nTool results and logs:\n" + result
+        )
+        # Use plain chat (no tools) for summarization
+        summary = llm_client.chat([
+            {"role": "system", "content": "You are a culinary and robotics analysis expert."},
+            {"role": "user", "content": summary_prompt},
+        ])
+        return summary
+    return result
 
 
 async def run_food_analysis_agent(dish_name: str, status_callback=None) -> str:
@@ -318,9 +315,11 @@ A clear summary table with all selected components, their IDs, and roles.
 - Which steps may need human oversight
 - Overall autonomy percentage estimate
 
+**After using all necessary tools, ALWAYS produce a final, human-readable robot design report in natural language. Do NOT output tool call JSONs as your final answer.**
 Be specific and reference actual component IDs from the database. Justify every \
 selection based on the task specification you received.
 """
+
 
 
 async def run_robotics_agent(task_specification: str, status_callback=None) -> str:
@@ -330,12 +329,7 @@ async def run_robotics_agent(task_specification: str, status_callback=None) -> s
     Connects to the Robotics MCP Server and designs a complete robotic platform
     based on the task specification from the Food Analysis Agent.
 
-    Args:
-        task_specification: The detailed task specification from Agent 1.
-        status_callback: Optional callable(str) for real-time status updates.
-
-    Returns:
-        A detailed robot design specification string.
+    If the final output is still tool call JSONs, send it back to the LLM for summarization.
     """
     server_script = str(SERVER_DIR / "robotics_mcp_server.py")
     user_message = (
@@ -345,12 +339,28 @@ async def run_robotics_agent(task_specification: str, status_callback=None) -> s
         f"--- TASK SPECIFICATION ---\n{task_specification}\n--- END SPECIFICATION ---"
     )
 
-    return await run_agent_with_mcp(
+    result = await run_agent_with_mcp(
         server_script=server_script,
         system_prompt=ROBOTICS_DESIGN_SYSTEM_PROMPT,
         user_message=user_message,
         status_callback=status_callback,
     )
+
+    # If the result looks like tool call JSONs, ask LLM to summarize
+    if result.strip().startswith('{"name":') or result.strip().startswith('[{"name":'):
+        if status_callback:
+            status_callback("Post-processing: summarizing tool results into human-readable report...")
+        summary_prompt = (
+            "Summarize the following tool results as a clear, human-readable robot design report for a technical audience. "
+            "Do NOT output tool call JSONs.\n\nTool results:\n" + result
+        )
+        # Use plain chat (no tools) for summarization
+        summary = llm_client.chat([
+            {"role": "system", "content": "You are a robotics design expert."},
+            {"role": "user", "content": summary_prompt},
+        ])
+        return summary
+    return result
 
 
 # ---------------------------------------------------------------------------

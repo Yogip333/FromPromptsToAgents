@@ -18,7 +18,7 @@ import asyncio
 import os
 from dotenv import load_dotenv
 
-from agents import run_robotic_chef_pipeline
+from agents import run_robotic_chef_pipeline, run_budget_nutrition_agent, run_robotics_agent
 import llm_client
 
 load_dotenv()
@@ -88,16 +88,15 @@ with st.sidebar:
 # Main content
 # ---------------------------------------------------------------------------
 
-st.title("Robotic Chef Platform")
-st.markdown("### Agent-to-Agent Multi-Agent System")
+st.title("Smart Budget RobotChef")
+st.markdown("### The Challenge: Plan a Two-Person Meal within a Budget")
 st.markdown(
     """
-    Enter a dish name below and the system will:
-    1. **Analyse** the dish using the Food Analysis Agent (Recipe MCP Server)
-    2. **Design** a custom robotic platform using the Robotics Agent (Robotics MCP Server)
-
-    The Food Analysis Agent's output is automatically passed to the Robotics Agent
-    as a structured task specification -- demonstrating A2A communication.
+    Enter your budget, nutrition target, and the system will:
+    1. **Pick a dish** that fits your budget and nutrition (Agent 1)
+    2. **Design a robot** to cook it (Agent 2)
+    3. **Show all reasoning and trade-offs**
+    (P.s: I love Gold Color hence I want to win the gold prize :P)
     """
 )
 
@@ -117,82 +116,103 @@ if not llm_token or llm_token == "your-token-here":
     )
 
 # ---------------------------------------------------------------------------
-# Input
-# ---------------------------------------------------------------------------
 
-col1, col2 = st.columns([3, 1])
 
-with col1:
-    dish_name = st.text_input(
-        "Dish name",
-        placeholder="e.g. pasta carbonara, sushi rolls, chocolate cake...",
-        label_visibility="collapsed",
-    )
-
-with col2:
-    run_button = st.button(
-        "Design Robot Chef",
-        type="primary",
-        use_container_width=True,
-    )
+# Contest Prompt Input
+st.subheader("Enter Full Prompt")
+prompt_text = st.text_area(
+    "Prompt",
+    value="",
+    height=80,
+    help="Paste the full contest prompt here (budget, people, nutrition, etc.)"
+)
+run_button = st.button(
+    "Run RobotChef Pipeline",
+    type="primary",
+    use_container_width=True,
+)
 
 # ---------------------------------------------------------------------------
 # Pipeline execution
 # ---------------------------------------------------------------------------
 
-if run_button and dish_name:
-    # Container for status updates
+
+
+import re
+def parse_prompt_for_fields(prompt):
+    # Defaults
+    budget = 15.0
+    people = 2
+    nutrition = "balanced"
+    # Budget
+    match = re.search(r"£\s?(\d+(?:\.\d{1,2})?)", prompt)
+    if match:
+        budget = float(match.group(1))
+    # People
+    match = re.search(r"(\d+)\s*people", prompt, re.IGNORECASE)
+    if match:
+        people = int(match.group(1))
+    # Nutrition
+    if re.search(r"high[- ]?protein", prompt, re.IGNORECASE):
+        nutrition = "high protein"
+    elif re.search(r"vegetarian", prompt, re.IGNORECASE):
+        nutrition = "vegetarian"
+    elif re.search(r"balanced", prompt, re.IGNORECASE):
+        nutrition = "balanced"
+    return budget, nutrition, people
+
+if run_button:
+    budget, nutrition, people = parse_prompt_for_fields(prompt_text)
     status_container = st.status(
-        f"Designing a robot chef for: **{dish_name}**", expanded=True
+        f"Prompt: {prompt_text}\n→ Parsed as: £{budget}, {people} people, nutrition: {nutrition}", expanded=True
     )
     status_lines = []
 
     def status_callback(msg: str):
-        """Callback to update the Streamlit status display."""
         status_lines.append(msg)
         with status_container:
             st.text(msg)
 
-    # Run the async pipeline
     try:
-        # Handle asyncio event loop for Streamlit compatibility
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
 
+        # Step 1: Agent 1 (budget/nutrition)
         if loop and loop.is_running():
-            # If already in an async context (e.g. some Streamlit setups),
-            # create a new loop in a thread
             import concurrent.futures
-
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                result = pool.submit(
+                food_analysis = pool.submit(
                     asyncio.run,
-                    run_robotic_chef_pipeline(dish_name, status_callback),
+                    run_budget_nutrition_agent(budget, nutrition, people, status_callback),
                 ).result()
         else:
-            result = asyncio.run(
-                run_robotic_chef_pipeline(dish_name, status_callback)
+            food_analysis = asyncio.run(
+                run_budget_nutrition_agent(budget, nutrition, people, status_callback)
+            )
+
+        status_callback("=== Stage 2: Designing Robot ===")
+        # Step 2: Agent 2 (robotics)
+        if loop and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                robot_design = pool.submit(
+                    asyncio.run,
+                    run_robotics_agent(food_analysis, status_callback),
+                ).result()
+        else:
+            robot_design = asyncio.run(
+                run_robotics_agent(food_analysis, status_callback)
             )
 
         status_container.update(label="Pipeline complete!", state="complete", expanded=False)
-
-        # Display results
         st.divider()
-
-        # Agent 1 output
-        with st.expander("Agent 1: Food Analysis", expanded=False):
-            st.markdown(result["food_analysis"])
-
-        # Agent 2 output
+        with st.expander("Agent 1: Dish Selection & Analysis", expanded=True):
+            st.markdown(food_analysis)
         with st.expander("Agent 2: Robot Design", expanded=True):
-            st.markdown(result["robot_design"])
+            st.markdown(robot_design)
 
     except Exception as e:
         status_container.update(label="Pipeline failed", state="error")
         st.error(f"An error occurred: {e}")
         st.exception(e)
-
-elif run_button and not dish_name:
-    st.warning("Please enter a dish name to get started.")

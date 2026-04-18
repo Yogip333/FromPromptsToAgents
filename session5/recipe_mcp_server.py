@@ -1078,5 +1078,139 @@ def get_safety_requirements(dish_name: str) -> str:
 # Run as MCP server
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# Budget & Nutrition Tools (for Smart Budget RobotChef)
+# ---------------------------------------------------------------------------
+
+# Simulated nutrition and price data (per dish, per serving)
+DISH_NUTRITION = {
+    "pasta carbonara": {"protein": 29, "kcal": 620, "vegetarian": False, "price_per_serving": 2.60},
+    "cheese soufflé": {"protein": 18, "kcal": 410, "vegetarian": True, "price_per_serving": 2.80},
+    "sushi rolls": {"protein": 16, "kcal": 350, "vegetarian": False, "price_per_serving": 3.10},
+    "pizza margherita": {"protein": 14, "kcal": 480, "vegetarian": True, "price_per_serving": 2.20},
+    "beef stir-fry": {"protein": 32, "kcal": 540, "vegetarian": False, "price_per_serving": 3.00},
+    "chocolate cake": {"protein": 5, "kcal": 390, "vegetarian": True, "price_per_serving": 1.10},
+    "fish and chips": {"protein": 28, "kcal": 700, "vegetarian": False, "price_per_serving": 3.50},
+    "pad thai": {"protein": 15, "kcal": 520, "vegetarian": False, "price_per_serving": 2.70},
+    "french omelette": {"protein": 17, "kcal": 250, "vegetarian": True, "price_per_serving": 1.50},
+    "bread": {"protein": 9, "kcal": 210, "vegetarian": True, "price_per_serving": 0.60},
+}
+
+@mcp.tool()
+def search_dishes(budget: float, nutrition: str, people: int) -> str:
+    """
+    Search for a dish that fits the given budget, nutrition target, and number of people.
+    And then return the best match with justification, price and nutritional info.
+
+    Args:
+        budget: Total budget in GBP (e.g. 12.0)
+        nutrition: Nutrition target ('high protein', 'vegetarian', 'balanced')
+        people: Number of servings required
+    """
+    nutrition = nutrition.lower().strip()
+    candidates = []
+    for key, info in DISH_NUTRITION.items():
+        total_price = info["price_per_serving"] * people
+        if total_price > budget:
+            continue
+        if nutrition == "vegetarian" and not info["vegetarian"]:
+            continue
+        if nutrition == "high protein" and info["protein"] < 20:
+            continue
+        candidates.append((key, info, total_price))
+
+    # If no strict match, relax protein threshold for high protein
+    if not candidates and nutrition == "high protein":
+        for key, info in DISH_NUTRITION.items():
+            total_price = info["price_per_serving"] * people
+            if total_price > budget:
+                continue
+            if info["protein"] >= 15:
+                candidates.append((key, info, total_price))
+
+    # If still no match, allow any dish under budget
+    if not candidates:
+        for key, info in DISH_NUTRITION.items():
+            total_price = info["price_per_serving"] * people
+            if total_price <= budget:
+                candidates.append((key, info, total_price))
+
+    if not candidates:
+        return json.dumps({
+            "error": f"No dish found for £{budget} ({people} people, {nutrition})",
+            "suggestion": "Try increasing budget or relaxing nutrition target."
+        }, indent=2)
+
+    # Pick the highest protein (if high protein), else lowest price, else first
+    if nutrition == "high protein":
+        best = max(candidates, key=lambda x: x[1]["protein"])
+    elif nutrition == "vegetarian":
+        best = min(candidates, key=lambda x: x[2])
+    else:
+        best = min(candidates, key=lambda x: abs(x[1]["protein"] - 15) + x[2])
+
+    key, info, total_price = best
+    dish = DISHES[key]
+    return json.dumps({
+        "dish_name": dish["name"],
+        "price": round(total_price, 2),
+        "protein_per_serving": info["protein"],
+        "kcal_per_serving": info["kcal"],
+        "vegetarian": info["vegetarian"],
+        "servings": people,
+        "justification": f"Selected for {nutrition} within £{budget} budget. Protein: {info['protein']}g/serving, Price: £{round(total_price,2)} for {people} people."
+    }, indent=2)
+
+
+@mcp.tool()
+def get_nutrition(dish_name: str, people: int) -> str:
+    """
+    Get nutrition info like protein, kcal for a dish and number of people.
+    Robust to name variations (partial/case-insensitive match).
+    """
+    key = dish_name.lower().strip()
+    info = DISH_NUTRITION.get(key)
+    if not info:
+        # Try partial/case-insensitive match
+        for db_key, db_info in DISH_NUTRITION.items():
+            if key in db_key or db_key in key:
+                info = db_info
+                break
+    if not info:
+        return json.dumps({"error": f"No nutrition info for {dish_name}"}, indent=2)
+    return json.dumps({
+        "dish_name": dish_name,
+        "protein_per_serving": info["protein"],
+        "kcal_per_serving": info["kcal"],
+        "total_protein": info["protein"] * people,
+        "total_kcal": info["kcal"] * people,
+        "servings": people,
+    }, indent=2)
+
+
+@mcp.tool()
+def get_price(dish_name: str, people: int) -> str:
+    """
+    Get realistic price for a dish for the given number of people.
+    Robust to name variations (partial/case-insensitive match).
+    """
+    key = dish_name.lower().strip()
+    info = DISH_NUTRITION.get(key)
+    if not info:
+        # Try partial/case-insensitive match
+        for db_key, db_info in DISH_NUTRITION.items():
+            if key in db_key or db_key in key:
+                info = db_info
+                break
+    if not info:
+        return json.dumps({"error": f"No price info for {dish_name}"}, indent=2)
+    return json.dumps({
+        "dish_name": dish_name,
+        "price_per_serving": info["price_per_serving"],
+        "total_price": round(info["price_per_serving"] * people, 2),
+        "servings": people,
+    }, indent=2)
+
 if __name__ == "__main__":
     mcp.run()
